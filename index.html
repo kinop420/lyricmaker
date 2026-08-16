@@ -271,8 +271,9 @@ nav button.on{background:var(--cream);border-color:var(--coffee);color:var(--cof
       <div class="tz-label" id="tapZoneLabel">🥤 タップで打刻スタート<small>再生しながら 歌い出しの瞬間にタップ</small></div>
     </div>
     <p class="hint" style="margin:8px 2px 12px">
-      <b>タップ</b>=打刻 / <b>左スワイプ</b>=1つ戻る / 行を<b>長押し</b>=そこからやり直し / 時刻タップ=手動修正<br>
-      PC: Space=打刻 Backspace=戻る Enter=再生停止 ←→=5秒
+      <b>タップ</b>=打刻(次の行まで表示) / <b>長押し</b>=押してる間だけ表示(離した時=終了) /
+      <b>左スワイプ</b>=1つ戻る / <b>右スワイプ</b>=打刻おわり / 行の長押し=そこからやり直し / 時刻タップ=手動修正<br>
+      PC: Space=打刻(長押し対応) Backspace=戻る Enter=再生停止 ←→=5秒
     </p>
     <ul id="lyricList"></ul>
   </section>
@@ -426,12 +427,12 @@ function parseLyrics(raw){
     const t = line.trim();
     if(t === ""){ prevBlank = true; return; }
     if(prevBlank){ sections.push({chorus:false}); secIdx++; prevBlank = false; }
-    lines.push({text:t, start:null, sec:secIdx, img:null});
+    lines.push({text:t, start:null, end:null, sec:secIdx, img:null});
   });
   const newTexts = lines.map(l=>l.text).join("\n");
   if(newTexts === oldTexts && state.lines.length){
     // 本文が同じなら打刻・画像割当・サビ指定を維持
-    lines.forEach((l,i)=>{ l.start = state.lines[i].start; l.img = state.lines[i].img; });
+    lines.forEach((l,i)=>{ l.start = state.lines[i].start; l.end = state.lines[i].end ?? null; l.img = state.lines[i].img; });
     sections.forEach((s,i)=>{ if(state.sections[i]) s.chorus = state.sections[i].chorus; });
   } else if(state.lines.length){
     toast("歌詞が変わったので打刻をリセットしました");
@@ -484,7 +485,8 @@ function renderList(){
     li.appendChild(imgb);
 
     const time = document.createElement("span");
-    time.className = "time"; time.textContent = fmt(l.start);
+    time.className = "time";
+    time.textContent = fmt(l.start) + (l.end!=null ? "→"+fmt(l.end) : "");
     time.onclick = (e)=>{ e.stopPropagation(); editTime(i); };
     li.appendChild(time);
 
@@ -510,14 +512,21 @@ function cycleImg(i){
   renderList(); save();
 }
 function editTime(i){
-  const cur = state.lines[i].start;
-  const v = prompt("時刻を入力(例 0:12.3 / 12.3)空欄=未打刻に戻す", cur!=null? fmt(cur):"");
+  const l = state.lines[i];
+  const v = prompt("開始時刻(例 0:12.3)空欄=未打刻に戻す", l.start!=null? fmt(l.start):"");
   if(v === null) return;
-  if(v.trim()===""){ state.lines[i].start = null; }
-  else{
-    const t = parseTime(v);
-    if(t==null){ toast("時刻の形式が読めません"); return; }
-    state.lines[i].start = t;
+  if(v.trim()===""){ l.start = null; l.end = null; renderList(); save(); return; }
+  const t = parseTime(v);
+  if(t==null){ toast("時刻の形式が読めません"); return; }
+  l.start = t;
+  const v2 = prompt("終了時刻(空欄=次の行まで表示)", l.end!=null? fmt(l.end):"");
+  if(v2 !== null){
+    if(v2.trim()===""){ l.end = null; }
+    else{
+      const t2 = parseTime(v2);
+      if(t2!=null && t2 > t) l.end = t2;
+      else toast("終了は開始より後にしてね");
+    }
   }
   renderList(); save();
 }
@@ -531,18 +540,21 @@ function resumeFrom(i){
 }
 
 /* ---------- 打刻 ---------- */
-function tap(){
+function tapAt(tStart, tEnd){
   if(!audio.src){ toast("先に音楽を選んでね"); return; }
   if(curIdx >= state.lines.length){ toast("全行打刻ずみ 🎉"); setTapMode(false); return; }
-  state.lines[curIdx].start = audio.currentTime;
+  state.lines[curIdx].start = tStart;
+  state.lines[curIdx].end = (tEnd!=null && tEnd - tStart >= 0.3) ? tEnd : null;
   curIdx++;
   renderList(); scrollToCurrent(); save();
   if(curIdx >= state.lines.length){ toast("全行打刻できた 🎉"); setTapMode(false); }
 }
+function tap(){ tapAt(audio.currentTime, null); }
 function undoTap(){
   if(curIdx <= 0 && state.lines[0]?.start==null){ toast("これ以上戻れません"); return; }
   curIdx = Math.max(0, curIdx-1);
   state.lines[curIdx].start = null;
+  state.lines[curIdx].end = null;
   renderList(); scrollToCurrent(); save();
   toast("1つ戻しました");
 }
@@ -550,30 +562,38 @@ function setTapMode(on){
   tapMode = on;
   $("#tapZone").classList.toggle("off", !on);
   $("#tapZoneLabel").innerHTML = on
-    ? '🫧 タップ=打刻!<small>左スワイプ=1つ戻る / もう一度長押しで終了</small>'
+    ? '🫧 タップ=打刻 / 長押し=表示時間ごと打刻<small>左スワイプ=戻る / 右スワイプ=おわり</small>'
     : '🥤 タップで打刻スタート<small>再生しながら 歌い出しの瞬間にタップ</small>';
 }
 
 /* タップゾーンのジェスチャ */
 (function(){
   const z = $("#tapZone");
-  let sx=0, sy=0, st=0, pressTm=null, longFired=false;
+  let sx=0, sy=0, st=0, downAudioT=0, downRippled=false;
   z.addEventListener("pointerdown", e=>{
-    sx=e.clientX; sy=e.clientY; st=performance.now(); longFired=false;
-    pressTm = setTimeout(()=>{ longFired=true; if(tapMode){ setTapMode(false); toast("打刻おわり"); } }, 600);
+    sx=e.clientX; sy=e.clientY; st=performance.now();
+    downAudioT = audio.currentTime;
+    downRippled = tapMode;
+    if(tapMode) ripple(e);
   });
   z.addEventListener("pointerup", e=>{
-    clearTimeout(pressTm);
-    if(longFired) return;
     const dx = e.clientX - sx, dy = e.clientY - sy;
     if(dx < -40 && Math.abs(dy) < 60){ if(tapMode) undoTap(); return; }
-    if(Math.abs(dx) < 12 && Math.abs(dy) < 12){
+    if(dx > 40 && Math.abs(dy) < 60){ if(tapMode){ setTapMode(false); toast("打刻おわり"); } return; }
+    if(Math.abs(dx) < 14 && Math.abs(dy) < 14){
       if(!tapMode){
         if(!state.lines.length){ toast("先に歌詞を反映してね"); return; }
         setTapMode(true);
         if(audio.paused && audio.src) togglePlay();
       } else {
-        tap(); ripple(e); bubbleBurst();
+        const held = performance.now() - st;
+        if(held >= 320){
+          tapAt(downAudioT, audio.currentTime);   // 長押し:押してる間=表示時間
+          toast("表示 " + (audio.currentTime - downAudioT).toFixed(1) + "秒");
+        } else {
+          tapAt(downAudioT, null);                 // タップ:開始のみ(次の行まで)
+        }
+        bubbleBurst();
       }
     }
   });
@@ -599,10 +619,24 @@ function setTapMode(on){
 })();
 
 /* ---------- キーボード ---------- */
+let spaceDownT = null, spaceDownAudio = 0;
+document.addEventListener("keyup", e=>{
+  if(e.code!=="Space" || spaceDownT===null) return;
+  const held = performance.now() - spaceDownT;
+  spaceDownT = null;
+  if(!tapMode) return;
+  if(held >= 320) tapAt(spaceDownAudio, audio.currentTime);
+  else tapAt(spaceDownAudio, null);
+});
 document.addEventListener("keydown", e=>{
   const tag = document.activeElement?.tagName;
   if(tag==="TEXTAREA" || tag==="INPUT") return;
-  if(e.code==="Space"){ e.preventDefault(); if(tapMode) tap(); else if(state.lines.length){ setTapMode(true); if(audio.paused&&audio.src) audio.play(); } }
+  if(e.code==="Space"){
+    e.preventDefault();
+    if(e.repeat) return;
+    if(tapMode){ spaceDownT = performance.now(); spaceDownAudio = audio.currentTime; }
+    else if(state.lines.length){ setTapMode(true); if(audio.paused&&audio.src) audio.play(); }
+  }
   else if(e.code==="Backspace"){ e.preventDefault(); undoTap(); }
   else if(e.code==="Enter"){ e.preventDefault(); togglePlay(); }
   else if(e.code==="ArrowLeft"){ audio.currentTime = Math.max(0, audio.currentTime-5); }
@@ -762,7 +796,10 @@ function timedLines(){
 }
 function lineWindow(tl, i){
   const start = tl[i].start;
-  const end = (i+1 < tl.length) ? tl[i+1].start : Math.min(start+4, audio.duration||start+4);
+  const nextS = (i+1 < tl.length) ? tl[i+1].start : null;
+  let end = nextS!=null ? nextS : Math.min(start+4, audio.duration||start+4);
+  if(tl[i].end!=null) end = nextS!=null ? Math.min(tl[i].end, nextS) : tl[i].end;
+  if(end <= start) end = start + 0.5;
   return {start, end};
 }
 function activeIndex(tl, t){
@@ -1229,7 +1266,8 @@ function drawSplatter(W,H){
   ctx.globalAlpha = 1;
 }
 
-const ANIMS   = ["popChar","slam","typewriter","fadeBlur","wipe","scatter","slideUp"];
+const ANIMS   = ["popChar","slam","typewriter","fadeBlur","wipe","scatter","slideUp","arcIn"];
+const SUSTAINS = ["none","none","zoom","drift","sway"]; // 表示中の持続モーション(noneも重要な表現)
 const LAYOUTS_916 = ["centerH","vertR","vertL","diag","upperH","bottomH"];
 const LAYOUTS_169 = ["centerH","bottomH","diag","upperH","vertR"];
 
@@ -1271,7 +1309,7 @@ function directLine(i, text, chorus){
     st.scale  = 1.25;
   } else if(len >= 16){
     st.layout = pickSeeded(["bottomH","centerH"], base+7, prev?.layout);
-    st.anim   = pickSeeded(["typewriter","fadeBlur","wipe","slideUp"], base+8, prev?.anim);
+    st.anim   = pickSeeded(["typewriter","fadeBlur","wipe","slideUp","arcIn"], base+8, prev?.anim);
     st.font   = pickSeeded([0,2,3], base+9, null);
     st.pal    = 0;
     st.scale  = 1;
@@ -1301,6 +1339,8 @@ function directLine(i, text, chorus){
     st.layout = "collage";
     st.anim = pickSeeded(["fadeBlur","slideUp","popChar","wipe"], base+28, null);
   }
+  st.sustain = chorus ? "zoom" : pickSeeded(SUSTAINS, base+30, null);
+  st.outline = ["mono","poster","aoi"].includes(state.preset) && !chorus && rnd(base+31) > 0.62;
   st.invertIdx = state.preset==="mono" && rnd(base+23)>0.55 ? Math.floor(rnd(base+24)*text.length) : -1;
   st.accentIdx = state.preset!=="soda" && rnd(base+25)>0.5 ? Math.floor(rnd(base+26)*text.length) : -1;
   st.seedBase = base;
@@ -1327,6 +1367,24 @@ function drawStagedLine(l, win, t, W, H, chorus){
 
   ctx.save();
   ctx.textBaseline = "middle";
+
+  // --- 持続モーション(表示中も動き続ける) ---
+  const sT = Math.max(0, t - win.start);
+  if(st.sustain==="zoom"){
+    const sc = 1 + Math.min(sT*0.014, 0.09);
+    ctx.translate(W/2, H/2); ctx.scale(sc, sc); ctx.translate(-W/2, -H/2);
+  } else if(st.sustain==="drift"){
+    ctx.translate(0, -Math.min(sT*7, 46));
+  } else if(st.sustain==="sway"){
+    const r = Math.sin(t*1.3)*0.014;
+    ctx.translate(W/2, H/2); ctx.rotate(r); ctx.translate(-W/2, -H/2);
+  }
+  // --- アンカー回転入場(弧を描いて入ってくる) ---
+  if(st.anim==="arcIn" && p < 1){
+    const ax = W*0.08, ay = H*0.9;
+    const rot = (1 - easeOutCubic(p)) * -0.35;
+    ctx.translate(ax, ay); ctx.rotate(rot); ctx.translate(-ax, -ay);
+  }
 
   // --- グラフィックデバイス(現在行のみ) ---
   const devA = Math.min(p*2,1) * (1-exitP);
@@ -1477,6 +1535,9 @@ function drawChars(text, posFn, fs, pal, st, p, exitP, t, win, vertical, delaySh
       case "slideUp":
         alpha = p; dy = (1-easeOutCubic(p))*44;
         break;
+      case "arcIn":
+        alpha = 0.15 + 0.85*p;
+        break;
     }
     alpha *= (1-exitP);
     if(alpha<=0.01) continue;
@@ -1510,6 +1571,19 @@ function drawChars(text, posFn, fs, pal, st, p, exitP, t, win, vertical, delaySh
       ctx.restore();
       continue;
     }
+    if(st.outline && !isAccent){
+      // 主線のみ(アクセント文字だけベタ塗りで対比)
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = fillColor;
+      ctx.lineWidth = Math.max(1.5, fs*0.05);
+      ctx.strokeText(ch, 0, 0);
+      if(st.anim==="slam" && p<1){
+        ctx.globalAlpha = alpha*0.25;
+        ctx.save(); ctx.scale(1.16,1.16); ctx.strokeText(ch,0,0); ctx.restore();
+      }
+      ctx.restore();
+      continue;
+    }
     if(pal.stroke){
       ctx.lineJoin = "round";
       ctx.fillStyle = pal.shadow;
@@ -1528,6 +1602,13 @@ function drawChars(text, posFn, fs, pal, st, p, exitP, t, win, vertical, delaySh
     }
     ctx.fillStyle = fillColor;
     ctx.fillText(ch, 0, 0);
+    if(st.anim==="slam" && p<1){
+      // モーションブラー風の残像
+      ctx.globalAlpha = alpha*0.22;
+      ctx.save(); ctx.scale(1.14,1.14); ctx.fillText(ch,0,0); ctx.restore();
+      ctx.globalAlpha = alpha*0.1;
+      ctx.save(); ctx.scale(1.3,1.3); ctx.fillText(ch,0,0); ctx.restore();
+    }
     ctx.restore();
   }
 }
@@ -1709,7 +1790,7 @@ function serialize(){
   return {
     v:1,
     lyricsRaw: state.lyricsRaw,
-    lines: state.lines.map(l=>({t:l.text, s:l.start, i:l.img})),
+    lines: state.lines.map(l=>({t:l.text, s:l.start, e:l.end, i:l.img})),
     sections: state.sections.map(s=>({c:s.chorus})),
     preset: state.preset, ratio: state.ratio, glitch: state.glitch,
     autoDirect: state.autoDirect, seed: state.seed,
@@ -1725,6 +1806,7 @@ function restore(data){
   data.lines?.forEach((d,i)=>{
     if(state.lines[i] && state.lines[i].text===d.t){
       state.lines[i].start = d.s;
+      state.lines[i].end = d.e ?? null;
       state.lines[i].img = d.i;
     }
   });
