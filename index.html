@@ -21,6 +21,8 @@
   --radius:16px;
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+textarea,input{-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
 html,body{height:100%}
 body{
   font-family:"Zen Maru Gothic","M PLUS Rounded 1c",sans-serif;
@@ -491,6 +493,7 @@ function renderList(){
     li.appendChild(time);
 
     // 長押しでこの行から再開
+    li.addEventListener("contextmenu", e=>e.preventDefault());
     let pressTm = null;
     li.addEventListener("pointerdown", ()=>{ pressTm = setTimeout(()=>{ resumeFrom(i); pressTm=null; }, 500); });
     li.addEventListener("pointerup",   ()=>{ if(pressTm) clearTimeout(pressTm); });
@@ -570,6 +573,8 @@ function setTapMode(on){
 (function(){
   const z = $("#tapZone");
   let sx=0, sy=0, st=0, downAudioT=0, downRippled=false;
+  z.addEventListener("contextmenu", e=>e.preventDefault());
+  z.addEventListener("touchstart", e=>e.preventDefault(), {passive:false});
   z.addEventListener("pointerdown", e=>{
     sx=e.clientX; sy=e.clientY; st=performance.now();
     downAudioT = audio.currentTime;
